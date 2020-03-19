@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+
+# Copyright (C) 2004-2020 APNIC Pty Ltd
+# See LICENSE for details.
+
+# Change log:
+# v20040901     Initial release; can do basic XPath searching
+# v20190301     Uh, where did libxml2 go?
+# v20200319     Homebrew's decision to hide libxml2 is amazingly awful
+
+import sys
+import libxml2
+
+def usage():
+    print("""Usage: %s <XPath expression> [<file> ...]
+
+Options:
+  -h  Treat input as HTML
+  -d  Don't strip off default namespaces
+  -s  Preserve whitespace in XML mode
+  -c  Only show a count of matching nodes, not the nodes themselves
+  -r  Don't recurse into result nodes for output
+  -f  Suppress printing of filenames when multiple files are searched
+  -?  Display this help text
+  -nprefix=href  Register a namespace prefix
+
+Options may be specified at any point in the command; they will apply to all
+subsequent files.  All options are toggles, and so can be used multiple times
+to alter behaviour per file.""" % sys.argv[0])
+    sys.exit(3)
+
+seen={}
+
+def denamespace(node):
+    """Remove any namespaces with no prefix, to allow XPath to work."""
+    while node != None:
+        # Note that node.ns() throws an exception if there's no namespace,
+        # rather than returning None.  Sigh.
+        try:
+            ns = node.ns()
+            if ns.get_name() == None:
+                node.setNs(None)
+        except:
+            pass
+
+        denamespace(node.get_children())
+        node = node.get_next()
+
+opt_html        = False         # Treat input as HTML, not XML
+opt_defaultns   = False         # Leave default namespaces alone
+opt_whitespace  = False         # Preserve all whitespace in output
+opt_countonly   = False         # Just show a count of matches
+opt_filenames   = False         # Suppress filenames?
+opt_norecurse   = False         # Only show matches, not their descendents
+opt_namespaces  = {}            # No namespaces registered
+
+def xgrep(doc, expr, name = None, ns = {}):
+    # Stripo namespaces, if required
+    if not opt_defaultns: denamespace(doc)
+
+    # Construct the XPath context
+    ctx = doc.xpathNewContext()
+
+    for prefix in ns.keys():
+        ctx.xpathRegisterNs(prefix, ns[prefix])
+
+    # Evaluate the expression
+    nodes = ctx.xpathEval(expr)
+
+    # Show results in preferred form
+    if opt_countonly and name: print("%s:%d" % (name, len(nodes)))
+    elif opt_countonly: print("%d" % len(nodes))
+    elif isinstance(nodes, str):
+        print("%s\n" % nodes)
+    else:
+        for node in nodes:
+            if name: print("%s:" % name,)
+            if opt_norecurse:
+                attrs = []
+                attr = node.get_properties()
+                while attr:
+                    attrs.append((attr.name, attr.content))
+                    attr = attr.get_next()
+                print(' '.join(['<%s' % node.name] + \
+                    ['%s="%s"' % (a, v) for (a, v) in attrs]), '/>')
+            else:
+                output = node.serialize(None, 0)
+                if not opt_whitespace:
+                    output = output.replace('\n', ' ')
+                print(output)
+
+# Gotta have at least one argument to make sense
+if len(sys.argv) < 2:
+    usage()
+
+# Count the number of non-argument arguments given
+filenames = -1
+for arg in sys.argv[1:]:
+    if not arg.startswith('-'): filenames = filenames + 1
+# And automatically suppress filenames if only one file is listed
+if filenames == 1: opt_filenames = True
+
+expr = None
+files = 0               # Count of files processed
+
+for arg in sys.argv[1:]:
+    if arg == '-h':   opt_html       = not opt_html
+    elif arg == '-d': opt_defaultns  = not opt_defaultns
+    elif arg == '-s': opt_whitespace = not opt_whitespace
+    elif arg == '-c': opt_countonly  = not opt_countonly
+    elif arg == '-r': opt_norecurse  = not opt_norecurse
+    elif arg == '-f': opt_filenames  = not opt_filenames
+    elif arg.startswith('-n'):
+        prefix, href = arg[2:].split(':', 1)
+        opt_namespaces[prefix] = href
+    elif arg == '-?': usage()
+    else:
+        if expr:
+            try:
+                # Read the file
+                if opt_html:
+                    doc = libxml2.htmlParseFile(arg, None)
+                else:
+                    doc = libxml2.parseFile(arg)
+
+                # Do the search
+                if opt_filenames:
+                    xgrep(doc, expr, ns = opt_namespaces)
+                else:
+                    xgrep(doc, expr, arg, ns = opt_namespaces)
+
+            except libxml2.parserError:
+                pass
+
+            files = files + 1
+        else:
+            expr = arg
+
+# No files, do stdin
+if files == 0:
+    try:
+        if opt_html:
+            doc = libxml2.htmlParseDoc(sys.stdin.read(), None)
+        else:
+            doc = libxml2.parseDoc(sys.stdin.read())
+
+        xgrep(doc, expr)
+    except libxml2.parserError:
+        pass
